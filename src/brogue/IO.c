@@ -2907,13 +2907,18 @@ void flashTemporaryAlert(char *message, int time) {
     flashMessage(message, (COLS - strLenWithoutEscapes(message)) / 2, ROWS / 2, time, &teal, &black);
 }
 
+int agentPromptKind = AGENT_PROMPT_NONE;
+
 void waitForAcknowledgment() {
     rogueEvent theEvent;
+    int priorPrompt;
 
     if (rogue.autoPlayingLevel || (rogue.playbackMode && !rogue.playbackOOS) || nonInteractivePlayback) {
         return;
     }
 
+    priorPrompt = agentPromptKind;
+    agentPromptKind = AGENT_PROMPT_ACKNOWLEDGE;
     do {
         nextBrogueEvent(&theEvent, false, false, false);
         if (theEvent.eventType == KEYSTROKE && theEvent.param1 != ACKNOWLEDGE_KEY && theEvent.param1 != ESCAPE_KEY) {
@@ -2921,6 +2926,7 @@ void waitForAcknowledgment() {
         }
     } while (!(theEvent.eventType == KEYSTROKE && (theEvent.param1 == ACKNOWLEDGE_KEY || theEvent.param1 == ESCAPE_KEY)
                || theEvent.eventType == MOUSE_UP));
+    agentPromptKind = priorPrompt;
 }
 
 void waitForKeystrokeOrMouseClick() {
@@ -2959,9 +2965,12 @@ boolean confirm(char *prompt, boolean alsoDuringPlayback) {
     buttons[1].hotkey[3] = ESCAPE_KEY;
     buttons[1].flags |= (B_WIDE_CLICK_AREA | B_KEYPRESS_HIGHLIGHT);
 
+    const int priorPrompt = agentPromptKind;
+    agentPromptKind = AGENT_PROMPT_CONFIRM;
     const SavedDisplayBuffer rbuf = saveDisplayBuffer();
     retVal = printTextBox(prompt, COLS/3, ROWS/3, COLS/3, &white, &interfaceBoxColor, buttons, 2);
     restoreDisplayBuffer(&rbuf);
+    agentPromptKind = priorPrompt;
 
     if (retVal == -1 || retVal == 1) { // If they canceled or pressed no.
         return false;
