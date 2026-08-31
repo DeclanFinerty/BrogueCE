@@ -1,0 +1,1 @@
+Fixed a bug in terminal mode that could make the game unresponsive for up to 32 seconds at startup before accepting any input.
