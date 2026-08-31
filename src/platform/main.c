@@ -39,6 +39,7 @@ static void printCommandlineHelp() {
 #ifdef BROGUE_CURSES
     "--term         -t          run in ncurses-based terminal mode\n"
 #endif
+    "--agent                    run headless, reading actions and writing state as JSON\n"
     "--variant variant_name     run a variant game (options: rapid_brogue, bullet_brogue)\n"
     "--stealth      -S          display stealth range\n"
     "--no-effects   -E          disable color effects\n"
@@ -288,6 +289,11 @@ int main(int argc, char *argv[])
             continue;
         }
 #endif
+
+        if (strcmp(argv[i], "--agent") == 0) {
+            currentConsole = agentConsole;
+            continue;
+        }
 
 #ifdef BROGUE_WEB
         if(strcmp(argv[i], "--server-mode") == 0) {

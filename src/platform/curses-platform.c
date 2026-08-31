@@ -113,16 +113,25 @@ static uint64_t getTime() {
     return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
-static long lastDelayTime = 0;
+static uint64_t lastDelayTime = 0;
 
 // Like SDL_Delay, but reduces the delay if time has passed since the last delay
 static void _delayUpTo(short ms) {
-    long curTime = getTime();
-    long timeDiff = curTime - lastDelayTime;
-    ms -= timeDiff;
+    uint64_t curTime = getTime();
 
-    if (ms > 0) {
-        Term.wait(ms);
+    // getTime() is milliseconds since the epoch, so on the first call the
+    // difference against a zero-initialised lastDelayTime is ~1.8e12. Assigning
+    // that into a short truncated it to 16 bits, which lands on a large positive
+    // value about a third of the time and slept for up to 32 seconds before the
+    // game read any input. Seed it on first use and keep the arithmetic wide.
+    if (lastDelayTime == 0) {
+        lastDelayTime = curTime;
+    }
+
+    long remaining = (long)ms - (long)(curTime - lastDelayTime);
+
+    if (remaining > 0) {
+        Term.wait((int)remaining);
     } // else delaying further would go past the time we want to delay until
 
     lastDelayTime = getTime();

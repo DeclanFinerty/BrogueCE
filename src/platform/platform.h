@@ -110,6 +110,7 @@ extern struct brogueConsole webConsole;
 #endif
 
 extern struct brogueConsole nullConsole;
+extern struct brogueConsole agentConsole;
 
 extern struct brogueConsole currentConsole;
 extern boolean noMenu;

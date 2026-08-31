@@ -18,3 +18,7 @@ BrogueCE-*
 *.gcov
 *.desktop
 gmon.out
+
+# Python harness
+.venv/
+__pycache__/
