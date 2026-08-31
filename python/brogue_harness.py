@@ -3,15 +3,14 @@
 
 Runs the ncurses build (`bin/brogue -t`) as a subprocess whose stdin/stdout are
 a pseudo-terminal, so keystrokes can be written in and the rendered screen read
-back out. This is the substrate a brogue-gym environment would sit on top of; it
-deliberately knows nothing about the game rules.
+back out. This is the substrate a brogue-gym environment sits on top of; it
+knows about the terminal, not about game rules.
 
 Requires a build with terminal support:
 
     make TERMINAL=YES GRAPHICS=YES bin/brogue
 
-`pyte` is optional. Without it you still get raw output and liveness checks;
-with it you get a decoded COLS x ROWS character grid.
+`pyte` is optional for raw driving, but required for parsed state.
 """
 
 from __future__ import annotations
@@ -19,10 +18,11 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import random
 import re
 import select
-import struct
 import shutil
+import struct
 import subprocess
 import tempfile
 import termios
@@ -30,26 +30,29 @@ import time
 from pathlib import Path
 
 try:
+    from brogue_state import COLS, ROWS, GameState, parse
+except ImportError:  # importable from outside python/ too
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from brogue_state import COLS, ROWS, GameState, parse
+
+try:
     import pyte
 except ImportError:
     pyte = None
 
-# Brogue's fixed screen geometry (src/brogue/Rogue.h).
-COLS = 100
-ROWS = 34
-STAT_BAR_WIDTH = 20            # sidebar columns on the left
-MESSAGE_LINES = 3              # message rows along the top
-MAP_LEFT = STAT_BAR_WIDTH + 1
-MAP_TOP = MESSAGE_LINES
-DCOLS = COLS - STAT_BAR_WIDTH - 1
-DROWS = ROWS - MESSAGE_LINES - 2
-
 BOOT_SETTLE = 1.0              # seconds of silence that mean "startup finished"
+MAX_SEED = 2 ** 31 - 1
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = REPO_ROOT / "bin" / "brogue"
 
 _ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\x1b\][^\x07]*\x07")
+
+# vi-keys, which is what the game reads for movement.
+MOVES = {"north": "k", "south": "j", "west": "h", "east": "l",
+         "northwest": "y", "northeast": "u",
+         "southwest": "b", "southeast": "n"}
 
 
 class BrogueError(RuntimeError):
@@ -59,62 +62,85 @@ class BrogueError(RuntimeError):
 class Brogue:
     """A single Brogue process attached to a pty."""
 
-    def __init__(self, seed: int = 1, binary: Path = DEFAULT_BINARY,
+    def __init__(self, seed: int | None = None, binary: Path = DEFAULT_BINARY,
                  wizard: bool = False, variant: str | None = None,
-                 extra_args: list[str] | None = None):
+                 extra_args: list[str] | None = None,
+                 rng: random.Random | None = None):
+        """
+        seed=<int>  every episode replays that dungeon (debugging, reproducibility)
+        seed=None   every episode draws a fresh random dungeon (generalization)
+
+        `reset(seed=...)` overrides it for a single episode, and the seed
+        actually in play is always readable as `.seed`.
+        """
         self.binary = Path(binary)
         if not self.binary.exists():
             raise BrogueError(
                 f"{self.binary} not found -- build it with "
                 f"'make TERMINAL=YES GRAPHICS=YES bin/brogue'")
 
-        # Brogue writes its save and recording files into the current directory,
-        # and picks a filename with a linear "does this exist yet?" scan. Sharing
-        # one directory across runs therefore leaves a pile of LastGame (N) files
-        # that makes every subsequent startup slower. Each game gets its own
-        # throwaway cwd instead, with --data-dir pointing back at the real assets.
-        self.workdir = Path(tempfile.mkdtemp(prefix="brogue-"))
+        self.fixed_seed = seed
+        self.rng = rng or random.Random()
+        self.wizard = wizard
+        self.variant = variant
+        self.extra_args = extra_args or []
 
-        # -t terminal mode, -n skip the menu, -s fix the seed for reproducibility.
-        self.argv = [str(self.binary), "-t", "-n", "-s", str(seed),
-                     "--data-dir", str(self.binary.parent)]
-        if wizard:
-            self.argv.append("--wizard")
-        if variant:
-            self.argv += ["--variant", variant]
-        self.argv += extra_args or []
-
+        self.seed: int | None = None
         self.proc: subprocess.Popen | None = None
         self.fd: int | None = None
+        self.workdir: Path | None = None
         self.raw = bytearray()
-
-        if pyte is not None:
-            self._screen = pyte.Screen(COLS, ROWS)
-            self._stream = pyte.ByteStream(self._screen)
-        else:
-            self._screen = self._stream = None
+        self._screen = self._stream = None
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self) -> "Brogue":
-        master, slave = pty.openpty()
+    def _next_seed(self, seed: int | None) -> int:
+        if seed is not None:
+            return seed
+        if self.fixed_seed is not None:
+            return self.fixed_seed
+        return self.rng.randrange(1, MAX_SEED)
 
-        # Size the pty BEFORE the game starts. If the size is set afterwards the
-        # child gets a SIGWINCH mid-run, ncurses handles it as a KEY_RESIZE and
-        # discards buffered input -- which silently ate the first keystroke on
-        # roughly one run in five.
+    def start(self, seed: int | None = None) -> "Brogue":
+        if self.proc is not None:
+            raise BrogueError("already started; call reset() instead")
+
+        self.seed = self._next_seed(seed)
+        self.raw = bytearray()
+        if pyte is not None:
+            self._screen = pyte.Screen(COLS, ROWS)
+            self._stream = pyte.ByteStream(self._screen)
+
+        argv = [str(self.binary), "-t", "-n", "-s", str(self.seed),
+                "--data-dir", str(self.binary.parent)]
+        if self.wizard:
+            argv.append("--wizard")
+        if self.variant:
+            argv += ["--variant", self.variant]
+        argv += self.extra_args
+        self.argv = argv
+
+        # Brogue writes its save and recording files into the current directory,
+        # and picks a filename with a linear "does this exist yet?" scan. Sharing
+        # one directory across episodes leaves a pile of LastGame (N) files that
+        # makes every later startup slower, so each game gets a throwaway cwd
+        # with --data-dir pointing back at the real assets.
+        self.workdir = Path(tempfile.mkdtemp(prefix="brogue-"))
+
+        master, slave = pty.openpty()
+        # Size the pty before the game starts, so ncurses sees 100x34 from its
+        # first initscr() and never has to handle a resize.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
-        env = dict(os.environ, TERM="xterm-256color",
-                   COLUMNS=str(COLS), LINES=str(ROWS))
         self.proc = subprocess.Popen(
-            self.argv,
-            cwd=self.workdir,         # save/recording files land here, not in bin/
-            env=env,
+            argv,
+            cwd=self.workdir,
+            env=dict(os.environ, TERM="xterm-256color",
+                     COLUMNS=str(COLS), LINES=str(ROWS)),
             stdin=slave, stdout=slave, stderr=slave,
             close_fds=True,
         )
-        os.close(slave)               # the child owns it now
+        os.close(slave)
         self.fd = master
 
         # Startup draws the map and animates the welcome messages, with gaps
@@ -136,7 +162,14 @@ class Brogue:
         os.close(self.fd)
         status, self.proc, self.fd = self.proc.returncode, None, None
         shutil.rmtree(self.workdir, ignore_errors=True)
+        self.workdir = None
         return status
+
+    def reset(self, seed: int | None = None) -> GameState:
+        """End the current episode and begin a fresh one. Returns the first state."""
+        self.stop()
+        self.start(seed)
+        return self.state()
 
     def __enter__(self):
         return self.start()
@@ -160,8 +193,8 @@ class Brogue:
 
         Waits up to `wait` seconds for the first byte, then keeps reading until
         the game has been silent for `settle` seconds. Two phases matter because
-        Brogue takes a few hundred ms to begin redrawing after a keystroke, so a
-        single quiet-gap window either fires too early or wastes time.
+        Brogue takes a couple hundred ms to begin redrawing after a keystroke, so
+        a single quiet-gap window either fires too early or wastes time.
         """
         chunk = bytearray()
         deadline = time.monotonic() + timeout
@@ -183,17 +216,36 @@ class Brogue:
         self.raw += chunk
         return bytes(chunk)
 
-    def step(self, keys: str, **kw) -> bytes:
-        """Send keys and read back whatever the game redraws."""
-        return self.send(keys).drain(**kw)
+    def step(self, keys: str, **kw) -> GameState:
+        """Send keys, read the redraw, and return the parsed state."""
+        self.send(keys).drain(**kw)
+        return self.state()
+
+    def move(self, direction: str, **kw) -> GameState:
+        """Move one step: 'north', 'southeast', ... See MOVES."""
+        try:
+            key = MOVES[direction]
+        except KeyError:
+            raise BrogueError(
+                f"unknown direction {direction!r}; expected one of {sorted(MOVES)}")
+        return self.step(key, **kw)
 
     # -- readback ----------------------------------------------------------
 
     def screen(self) -> list[str]:
-        """The decoded ROWS x COLS grid. Requires pyte."""
+        """The decoded ROWS x COLS grid, sidebar included. Requires pyte."""
         if self._screen is None:
             raise BrogueError("pyte is not installed; screen() is unavailable")
         return self._screen.display
+
+    def state(self) -> GameState:
+        """The current screen, parsed into structured state. Requires pyte."""
+        if self._screen is None:
+            raise BrogueError("pyte is not installed; state() is unavailable")
+        state = parse(self._screen)
+        if not self.alive:
+            state.game_over = True
+        return state
 
     def text(self) -> str:
         """Best-effort text, with or without pyte."""
@@ -202,43 +254,39 @@ class Brogue:
         return _ANSI.sub(b"", bytes(self.raw)).decode("utf-8", "replace")
 
     def find_player(self) -> tuple[int, int] | None:
-        """Locate the '@' glyph, in screen coords. Requires pyte.
-
-        Searches the map viewport only -- the sidebar legend also prints "@: You".
-        """
-        for y in range(MAP_TOP, MAP_TOP + DROWS):
-            x = self.screen()[y].find("@", MAP_LEFT)
-            if x != -1:
-                return x, y
-        return None
+        """Player position in map coordinates, or None if off-screen."""
+        return self.state().player
 
 
 def smoke_test(seed: int = 1) -> int:
-    """Start a game, walk east, prove the process is still alive."""
+    """Start a game, walk east, and report the parsed state."""
     print(f"binary : {DEFAULT_BINARY}")
-    print(f"pyte   : {'yes' if pyte else 'no (pip install pyte for a screen grid)'}")
+    print(f"pyte   : {'yes' if pyte else 'no (pip install pyte)'}")
 
     with Brogue(seed=seed) as game:
-        print(f"pid    : {game.proc.pid}  argv: {' '.join(game.argv[1:])}")
+        print(f"pid    : {game.proc.pid}   seed: {game.seed}")
         print(f"boot   : {len(game.raw)} bytes, alive={game.alive}")
 
-        before = game.find_player() if pyte else None
-        out = game.step("l")  # 'l' = move east (vi keys)
-        after = game.find_player() if pyte else None
+        if not pyte:
+            print(f"tail   : {game.text().splitlines()[-1][:90]!r}")
+            print(f"\nresult : {'OK' if game.alive else 'FAILED'}")
+            return 0 if game.alive else 1
 
-        print(f"sent   : 'l' (move east) -> {len(out)} bytes redrawn")
-        if pyte:
-            print(f"player : {before} -> {after}")
-            print("\n--- screen " + "-" * 60)
-            for line in game.screen():
-                print(line.rstrip())
-            print("-" * 71)
-        else:
-            tail = game.text().split("\n")[-1][:100]
-            print(f"tail   : {tail!r}")
+        before = game.state()
+        after = game.move("east")
 
-        ok = game.alive
-        print(f"\nresult : {'OK - process alive after keystroke' if ok else 'FAILED - process died'}")
+        print(f"player : {before.player} -> {after.player}")
+        print(f"depth  : {after.depth}   hp: {after.hp_fraction:.2f}   "
+              f"nutrition: {after.nutrition_fraction:.2f}")
+        print(f"str    : {after.strength}   armor: {after.armor}   gold: {after.gold}")
+        print(f"msgs   : {after.messages}")
+        print(f"dead   : {after.dead}")
+        print("\n--- map " + "-" * 63)
+        print(after.render())
+        print("-" * 71)
+
+        ok = game.alive and after.player == (before.player[0] + 1, before.player[1])
+        print(f"\nresult : {'OK - moved one tile east' if ok else 'FAILED'}")
 
     return 0 if ok else 1
 
