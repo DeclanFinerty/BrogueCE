@@ -1,0 +1,1 @@
+Added a headless --agent mode that reads actions and writes game state as JSON, for driving the game from a program.
