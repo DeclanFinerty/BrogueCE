@@ -89,6 +89,21 @@ static void agentEmitLegend() {
         agentJsonString(tileCatalog[i].description);
     }
 
+    // Terrain flags per tile type (terrainFlagCatalog / terrainMechanicalFlagCatalog),
+    // so the agent decides passability and danger from the same bits the game uses
+    // instead of guessing from the description strings.
+    printf("],\"tile_flags\":[");
+    for (int i = 0; i < NUMBER_TILETYPES; i++) {
+        if (i) putchar(',');
+        printf("%lu", (unsigned long) tileCatalog[i].flags);
+    }
+
+    printf("],\"tile_mech_flags\":[");
+    for (int i = 0; i < NUMBER_TILETYPES; i++) {
+        if (i) putchar(',');
+        printf("%lu", (unsigned long) tileCatalog[i].mechFlags);
+    }
+
     printf("],\"monsters\":[");
     for (int i = 0; i < NUMBER_MONSTER_KINDS; i++) {
         if (i) putchar(',');
@@ -154,8 +169,23 @@ static void agentEmitState(boolean textInput) {
     printf(",\"hp\":%i,\"max_hp\":%i", player.currentHP, player.info.maxHP);
     printf(",\"player\":{\"x\":%i,\"y\":%i}", player.loc.x, player.loc.y);
     printf(",\"text_input\":%s", textInput ? "true" : "false");
+
+    // Which prompt is blocking, so the agent can answer it on purpose. The
+    // dangerous moves the game asks about -- diving into a chasm, walking into
+    // caustic gas -- are legitimate plays, so agent mode reports the question
+    // rather than answering it.
+    // A confirmation box runs through the button loop, which asks for textInput,
+    // so the specific kind wins over the generic flag.
+    printf(",\"prompt\":%i", agentPromptKind != AGENT_PROMPT_NONE ? agentPromptKind
+                              : (textInput ? AGENT_PROMPT_TEXT : AGENT_PROMPT_NONE));
     printf(",\"dead\":%s", player.currentHP <= 0 ? "true" : "false");
     printf(",\"game_over\":%s", agentEpisodeOver() ? "true" : "false");
+
+    // Why the run ended. Empty until gameOver() runs; killed_by_custom false
+    // means the string is a monster name, true means it is a whole phrase.
+    printf(",\"killed_by\":");
+    agentJsonString(agentKilledBy);
+    printf(",\"killed_by_custom\":%s", agentKilledByCustom ? "true" : "false");
     agentEmitGrids();
     agentEmitMonsters();
     printf("}\n");

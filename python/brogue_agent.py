@@ -59,6 +59,15 @@ def raw_key(ch: str) -> int:
     return RAW_KEY_BASE + ord(ch)
 
 
+class Prompt(IntEnum):
+    """Which modal prompt is waiting for a key. Matches agentPromptKinds."""
+
+    NONE = 0
+    CONFIRM = 1        # a yes/no box: "Dive into the depths?"
+    ACKNOWLEDGE = 2    # --MORE--
+    TEXT = 3           # a string is being typed
+
+
 class BrogueAgentError(RuntimeError):
     pass
 
@@ -93,6 +102,9 @@ class AgentState:
     dead: bool
     game_over: bool
     text_input: bool
+    killed_by: str = ""          # empty until the run ends
+    killed_by_custom: bool = False   # False: a monster name. True: a whole phrase.
+    prompt: int = 0              # a Prompt: what the game is waiting to be told
 
     @property
     def player(self) -> tuple[int, int]:
@@ -115,6 +127,8 @@ class Legend:
     raw_key_base: int
     tiles: list[str]
     monsters: list[str]
+    tile_flags: list[int]        # terrainFlagCatalog bits, per tile type
+    tile_mech_flags: list[int]   # terrainMechanicalFlagCatalog bits, per tile type
 
     def tile_name(self, tile_id: int) -> str:
         return self.tiles[tile_id] if 0 <= tile_id < len(self.tiles) else f"?{tile_id}"
@@ -188,6 +202,8 @@ class AgentBrogue:
             width=message["width"], height=message["height"],
             action_count=message["action_count"], raw_key_base=message["raw_key_base"],
             tiles=message["tiles"], monsters=message["monsters"],
+            tile_flags=message["tile_flags"],
+            tile_mech_flags=message["tile_mech_flags"],
         )
 
         self.state = self._read_state()
@@ -265,6 +281,9 @@ class AgentBrogue:
             terrain=message["terrain"], visibility=message["visibility"],
             monsters=monsters, dead=message["dead"],
             game_over=message["game_over"], text_input=message["text_input"],
+            killed_by=message.get("killed_by", ""),
+            killed_by_custom=message.get("killed_by_custom", False),
+            prompt=message.get("prompt", 0),
         )
 
     def step(self, action: int) -> AgentState:

@@ -197,6 +197,9 @@ void initializeRogue(uint64_t seed) {
     char currentGamePath[BROGUE_FILENAME_MAX];
     enum gameMode mode;
 
+    agentKilledBy[0] = '\0';
+    agentKilledByCustom = false;
+
     playingback = rogue.playbackMode; // the only animals that need to go on the ark
     playbackPaused = rogue.playbackPaused;
     playbackFF = rogue.playbackFastForward;
@@ -1043,6 +1046,9 @@ void freeEverything() {
     free(rogue.featRecord);
 }
 
+char agentKilledBy[DCOLS] = "";
+boolean agentKilledByCustom = false;
+
 void gameOver(char *killedBy, boolean useCustomPhrasing) {
     short i, y;
     char buf[200], highScoreText[200], buf2[200];
@@ -1056,6 +1062,10 @@ void gameOver(char *killedBy, boolean useCustomPhrasing) {
         // we've already been through this once; let's avoid overkill.
         return;
     }
+
+    strncpy(agentKilledBy, killedBy, DCOLS - 1);
+    agentKilledBy[DCOLS - 1] = '\0';
+    agentKilledByCustom = useCustomPhrasing;
 
     player.bookkeepingFlags |= MB_IS_DYING;
     rogue.autoPlayingLevel = false;

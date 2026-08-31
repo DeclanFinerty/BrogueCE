@@ -2854,6 +2854,24 @@ typedef struct archivedMessage {
     unsigned long flags;
 } archivedMessage;
 
+// Which modal prompt, if any, is waiting for a key. A headless agent cannot see
+// the screen, so without this it cannot tell "the game is asking whether to dive
+// into the chasm" from "that move was blocked" -- both just look like a turn that
+// did not happen.
+enum agentPromptKinds {
+    AGENT_PROMPT_NONE = 0,
+    AGENT_PROMPT_CONFIRM,       // a yes/no box: dive into the depths, venture into gas
+    AGENT_PROMPT_ACKNOWLEDGE,   // --MORE--, waiting to be dismissed
+    AGENT_PROMPT_TEXT,          // a string is being typed
+};
+extern int agentPromptKind;
+
+// Set by gameOver() so a headless agent can report why the run ended; empty
+// until then. agentKilledByCustom mirrors gameOver's useCustomPhrasing: false
+// means the string is a monster name, true means it is a whole phrase.
+extern char agentKilledBy[DCOLS];
+extern boolean agentKilledByCustom;
+
 extern boolean serverMode;
 extern boolean nonInteractivePlayback;
 extern boolean hasGraphics;
